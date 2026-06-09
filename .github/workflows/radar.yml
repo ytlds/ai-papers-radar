@@ -1,0 +1,68 @@
+name: radar
+
+on:
+  schedule:
+    # Weekly: every Monday at 08:00 UTC (= JST 17:00)
+    - cron: '0 8 * * 1'
+    # Monthly: 1st of every month at 09:00 UTC.
+    # The script computes the previous calendar month's window
+    # (e.g. when triggered on 2026-06-01, it covers 2026-05-01 ~ 2026-05-31).
+    - cron: '0 9 1 * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Digest mode'
+        required: true
+        default: 'weekly'
+        type: choice
+        options:
+          - weekly
+          - monthly
+
+permissions:
+  contents: write   # needed to commit reports/ and state.json back to the repo
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Determine mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 9 1 * *" ]; then
+            echo "value=monthly" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=weekly" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run radar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO:   ${{ secrets.MAIL_TO }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+        run: python3 radar/run.py "${{ steps.mode.outputs.value }}"
+
+      - name: Commit report and state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/ radar/state.json || true
+          if ! git diff --cached --quiet; then
+            git commit -m "radar: ${{ steps.mode.outputs.value }} digest $(date -u +%Y-%m-%d)"
+            git push
+          else
+            echo "No changes to commit."
+          fi
