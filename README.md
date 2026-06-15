@@ -1,4 +1,4 @@
-# ai-infer-radar
+# ai-papers-radar
 
 A zero-dependency Python script + GitHub Actions workflow that produces a weekly
 and monthly digest of recent work in **LLM inference acceleration**, sourced

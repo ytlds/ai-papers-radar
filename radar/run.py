@@ -45,138 +45,76 @@ from pathlib import Path
 from typing import Iterable
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration loading (fail-fast)
 # ---------------------------------------------------------------------------
+# All tunable parameters live in config.py (zero-dependency plain Python).
+# There are NO built-in defaults here: if config.py is missing or fails to
+# import, abort immediately rather than running with implicit values.
 
+try:
+    import config as cfg
+except Exception as e:  # noqa: BLE001 - any import failure must abort
+    print(
+        f"[fatal] failed to load config.py: {type(e).__name__}: {e}\n"
+        f"        config.py must be importable from the same directory as "
+        f"radar.py; there are no built-in defaults.",
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
+
+def _require(name: str):
+    """Fetch a required attribute from config, aborting if absent."""
+    if not hasattr(cfg, name):
+        print(f"[fatal] config.py is missing required setting: {name}",
+              file=sys.stderr)
+        sys.exit(3)
+    return getattr(cfg, name)
+
+
+# Network
+USER_AGENT = _require("USER_AGENT")
+REQ_TIMEOUT = _require("REQ_TIMEOUT")
+REQ_MAX_RETRIES = _require("REQ_MAX_RETRIES")
+REQ_BACKOFF_BASE = _require("REQ_BACKOFF_BASE")
+
+# Per-mode report layout (kept independent; see config.py)
+MODE_CONFIG = {
+    "weekly": _require("WEEKLY"),
+    "monthly": _require("MONTHLY"),
+}
+
+# Scoring
+MIN_SCORE = _require("MIN_SCORE")
+KEYWORDS_SCORED = _require("KEYWORDS_SCORED")
+AFFILIATION_BOOST = _require("AFFILIATION_BOOST")
+
+# arXiv
+ARXIV_CATEGORIES = _require("ARXIV_CATEGORIES")
+ARXIV_MAX_RESULTS = _require("ARXIV_MAX_RESULTS")
+ARXIV_QUERY_TERMS = _require("ARXIV_QUERY_TERMS")
+
+# GitHub
+GITHUB_REPOS = _require("GITHUB_REPOS")
+GITHUB_RELEASE_BOOST = _require("GITHUB_RELEASE_BOOST")
+GITHUB_PRERELEASE_BOOST = _require("GITHUB_PRERELEASE_BOOST")
+
+# RSS / HF scoring tweaks
+RSS_FEEDS = _require("RSS_FEEDS")
+RSS_BOOST = _require("RSS_BOOST")
+HF_UPVOTE_DIVISOR = _require("HF_UPVOTE_DIVISOR")
+HF_UPVOTE_CAP = _require("HF_UPVOTE_CAP")
+
+# Email
+SMTP_HOST = _require("SMTP_HOST")
+SMTP_PORT = _require("SMTP_PORT")
+SMTP_TIMEOUT = _require("SMTP_TIMEOUT")
+
+# Paths (derived from repo root)
 REPO_ROOT = Path(__file__).resolve().parent.parent
-STATE_FILE = REPO_ROOT / "radar" / "state.json"
-REPORTS_DIR = REPO_ROOT / "reports"
-
-USER_AGENT = "ai-infer-radar/1.0 (github-actions)"
-REQ_TIMEOUT = 30  # seconds
-
-# Retry policy for all network calls.
-# Strategy: retry on ANY exception (including HTTP 4xx), exponential backoff.
-REQ_MAX_RETRIES = 3          # total attempts = REQ_MAX_RETRIES
-REQ_BACKOFF_BASE = 1.0       # seconds; delays are 1s, 2s, 4s, ...
-
-# arXiv categories most relevant for inference acceleration
-ARXIV_CATEGORIES = ["cs.LG", "cs.DC", "cs.AR", "cs.CL"]
-ARXIV_MAX_RESULTS = 300  # per category per run
-
-# Keyword scoring table. Hits add to the relevance score.
-# Tuned for: attention/KV cache, quantization/sparsity, speculative/parallel
-# decoding, serving/scheduling, hardware/kernel/compiler.
-KEYWORDS_SCORED: dict[str, int] = {
-    # Core inference verbs (cheap baseline)
-    "inference": 1,
-    "serving": 2,
-    "decoding": 2,
-    "latency": 1,
-    "throughput": 1,
-    # Attention / KV cache
-    "kv cache": 4,
-    "kv-cache": 4,
-    "paged attention": 5,
-    "pagedattention": 5,
-    "flash attention": 5,
-    "flashattention": 5,
-    "prefix caching": 4,
-    "chunked prefill": 4,
-    "radix attention": 4,
-    "attention sink": 3,
-    # Quantization / sparsity
-    "quantization": 3,
-    "quantized": 2,
-    "w4a16": 4,
-    "w8a8": 4,
-    "fp8": 3,
-    "int4": 3,
-    "int8": 2,
-    "gptq": 4,
-    "awq": 4,
-    "smoothquant": 4,
-    "sparsity": 2,
-    "sparse": 1,
-    "pruning": 2,
-    "mixture of experts": 2,
-    "moe": 2,
-    # Speculative / parallel decoding
-    "speculative decoding": 5,
-    "speculative sampling": 5,
-    "medusa": 4,
-    "eagle": 3,
-    "lookahead decoding": 4,
-    "parallel decoding": 4,
-    "multi-token prediction": 4,
-    "tree attention": 3,
-    # Serving / scheduling
-    "continuous batching": 4,
-    "vllm": 3,
-    "sglang": 3,
-    "tensorrt-llm": 3,
-    "disaggregated": 4,
-    "prefill-decode": 4,
-    "pd separation": 4,
-    "mooncake": 3,
-    "scheduler": 1,
-    # Hardware / kernel / compiler
-    "cuda kernel": 3,
-    "triton kernel": 3,
-    "cutlass": 3,
-    "torch.compile": 3,
-    "tensor parallelism": 3,
-    "pipeline parallelism": 2,
-    "communication overlap": 3,
-    "mlir": 2,
-    # LLM general (lower weight to avoid flooding)
-    "large language model": 1,
-    "llm": 1,
-    "transformer": 1,
-}
-
-# Author/affiliation hints that boost a paper. Matched against
-# the abstract/authors text. Keep this short and high-precision.
-AFFILIATION_BOOST: dict[str, int] = {
-    "carnegie mellon": 2,
-    "stanford": 2,
-    "berkeley": 2,
-    "mit": 2,
-    "tsinghua": 2,
-    "peking university": 2,
-    "deepseek": 3,
-    "nvidia": 2,
-    "meta ai": 2,
-    "google deepmind": 2,
-    "microsoft research": 2,
-    "anthropic": 2,
-}
-
-# GitHub repos to watch for releases
-GITHUB_REPOS = [
-    "vllm-project/vllm",
-    "sgl-project/sglang",
-    "NVIDIA/TensorRT-LLM",
-    "Dao-AILab/flash-attention",
-    "huggingface/transformers",
-    "microsoft/DeepSpeed",
-    "InternLM/lmdeploy",
-    "ggml-org/llama.cpp",
-    "ModelTC/lightllm",
-]
-
-# RSS feeds (public, no auth)
-RSS_FEEDS = [
-    ("NVIDIA Developer Blog", "https://developer.nvidia.com/blog/feed"),
-    ("vLLM Blog", "https://blog.vllm.ai/feed.xml"),
-]
-
-# arXiv keyword filter applied at query time (OR-joined)
-# Keep this broad; precise scoring happens after fetch.
-ARXIV_QUERY_TERMS = [
-    "inference", "serving", "decoding", "kv cache", "quantization",
-    "speculative", "attention", "throughput", "latency",
-]
+STATE_FILE = REPO_ROOT.joinpath(*_require("STATE_SUBPATH"))
+REPORTS_DIR = REPO_ROOT.joinpath(*_require("REPORTS_SUBPATH"))
+STATE_MAX_IDS = _require("STATE_MAX_IDS")
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +468,7 @@ def score_item(item: Item) -> None:
 
     if item.source == "hf-daily":
         upvotes = int(item.extra.get("upvotes", 0) or 0)
-        bonus = min(upvotes // 10, 5)  # cap at +5
+        bonus = min(upvotes // HF_UPVOTE_DIVISOR, HF_UPVOTE_CAP)
         if bonus:
             score += bonus
             reasons.append(f"hf-upvotes:{upvotes}(+{bonus})")
@@ -539,16 +477,16 @@ def score_item(item: Item) -> None:
         # Releases are signals, not papers — give a small flat boost so they
         # show up but don't outrank scored papers. Skip prereleases noise.
         if not item.extra.get("prerelease"):
-            score += 3
-            reasons.append("github-release(+3)")
+            score += GITHUB_RELEASE_BOOST
+            reasons.append(f"github-release(+{GITHUB_RELEASE_BOOST})")
         else:
-            score += 1
-            reasons.append("github-prerelease(+1)")
+            score += GITHUB_PRERELEASE_BOOST
+            reasons.append(f"github-prerelease(+{GITHUB_PRERELEASE_BOOST})")
 
     if item.source == "rss":
         # Blog posts: small boost; ranking will mostly depend on keyword hits.
-        score += 2
-        reasons.append("blog-post(+2)")
+        score += RSS_BOOST
+        reasons.append(f"blog-post(+{RSS_BOOST})")
 
     item.score = score
     item.reasons = reasons
@@ -596,8 +534,8 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # Keep state file bounded: only retain last 5000 IDs
-    state["seen_ids"] = list(dict.fromkeys(state["seen_ids"]))[-5000:]
+    # Keep state file bounded: only retain the most recent STATE_MAX_IDS IDs
+    state["seen_ids"] = list(dict.fromkeys(state["seen_ids"]))[-STATE_MAX_IDS:]
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
@@ -608,7 +546,15 @@ def save_state(state: dict) -> None:
 def render_markdown(mode: str, items: list[Item], failures: list[str],
                     window_label: str) -> str:
     today = datetime.now(timezone.utc).date().isoformat()
-    top_n = 15 if mode == "monthly" else 10
+
+    # Per-mode layout config (weekly / monthly are independent dicts).
+    mode_cfg = MODE_CONFIG[mode]
+    quota_map: dict[str, int] = mode_cfg["top_quota_per_source"]
+    quota_default: int = mode_cfg["top_quota_default"]
+    by_source_truncate: int = mode_cfg["by_source_truncate"]
+
+    # Canonical source display order.
+    SOURCE_ORDER = ["arxiv", "hf-daily", "github", "rss"]
 
     lines: list[str] = []
     if mode == "monthly":
@@ -617,8 +563,6 @@ def render_markdown(mode: str, items: list[Item], failures: list[str],
         lines.append(f"# AI Inference Acceleration Radar — Weekly Digest")
     lines.append(f"_Generated: {today} UTC  ·  Window: {window_label}_")
     lines.append("")
-    lines.append(f"Mode: **{mode}**  ·  New items this run: **{len(items)}**  ·  Top shown: **{min(top_n, len(items))}**")
-    lines.append("")
 
     if failures:
         lines.append("> ⚠️ Source failures this run:")
@@ -626,44 +570,79 @@ def render_markdown(mode: str, items: list[Item], failures: list[str],
             lines.append(f"> - {f}")
         lines.append("")
 
-    # Group by source for the body, after a top-N summary
-    items_sorted = sorted(items, key=lambda x: (-x.score, x.published))
-    # primary key = score desc, secondary = published asc
+    # Group items by source, each bucket sorted by score desc, published asc.
+    by_source: dict[str, list[Item]] = {}
+    for it in items:
+        by_source.setdefault(it.source, []).append(it)
+    for src in by_source:
+        by_source[src].sort(key=lambda x: (-x.score, x.published))
 
-    lines.append(f"## Top {min(top_n, len(items))} by Score")
+    # Any source present in the data but not in SOURCE_ORDER is appended so it
+    # is never silently dropped.
+    ordered_sources = SOURCE_ORDER + [s for s in by_source if s not in SOURCE_ORDER]
+
+    # Count how many items the Top section will show (sum of per-source quotas,
+    # capped by what's actually available) for the header line.
+    top_shown = sum(
+        min(len(by_source.get(src, [])), quota_map.get(src, quota_default))
+        for src in ordered_sources
+    )
+
+    lines.append(
+        f"Mode: **{mode}**  ·  New items this run: **{len(items)}**  ·  "
+        f"Top shown: **{top_shown}**"
+    )
     lines.append("")
-    for i, it in enumerate(items_sorted[:top_n], 1):
-        lines.append(f"### {i}. [{it.title}]({it.url})")
-        lines.append(f"- **Source**: `{it.source}`  ·  **Published**: {it.published}  ·  **Score**: {it.score}")
-        if it.authors:
-            authors_short = it.authors if len(it.authors) < 200 else it.authors[:200] + "…"
-            lines.append(f"- **Authors / Repo**: {authors_short}")
-        if it.abstract:
-            abs_short = it.abstract if len(it.abstract) < 600 else it.abstract[:600] + "…"
-            lines.append(f"- **Abstract**: {abs_short}")
-        if it.reasons:
-            lines.append(f"- **Why scored**: {', '.join(it.reasons[:8])}")
-        lines.append("")
 
-    # Per-source breakdown
+    # ---------------------- Top section (per-source quota) -----------------
+    # Built per source to prevent any single high-volume source (e.g. arxiv)
+    # from monopolizing the digest. Each source contributes up to its quota,
+    # picking its own highest-scored items.
+    lines.append("## Top by Score (per-source quota)")
+    quota_summary = ", ".join(
+        f"{src}≤{quota_map.get(src, quota_default)}"
+        for src in ordered_sources if by_source.get(src)
+    )
+    lines.append(f"_Quota: {quota_summary}_")
+    lines.append("")
+
+    for src in ordered_sources:
+        bucket = by_source.get(src, [])
+        if not bucket:
+            continue
+        quota = quota_map.get(src, quota_default)
+        picked = bucket[:quota]
+        lines.append(f"### {src} — top {len(picked)}")
+        lines.append("")
+        for i, it in enumerate(picked, 1):
+            lines.append(f"#### {i}. [{it.title}]({it.url})")
+            lines.append(f"- **Source**: `{it.source}`  ·  **Published**: {it.published}  ·  **Score**: {it.score}")
+            if it.authors:
+                authors_short = it.authors if len(it.authors) < 200 else it.authors[:200] + "…"
+                lines.append(f"- **Authors / Repo**: {authors_short}")
+            if it.abstract:
+                abs_short = it.abstract if len(it.abstract) < 600 else it.abstract[:600] + "…"
+                lines.append(f"- **Abstract**: {abs_short}")
+            if it.reasons:
+                lines.append(f"- **Why scored**: {', '.join(it.reasons[:8])}")
+            lines.append("")
+
+    # ---------------------- By Source breakdown ----------------------------
     lines.append("## By Source")
     lines.append("")
-    by_source: dict[str, list[Item]] = {}
-    for it in items_sorted:
-        by_source.setdefault(it.source, []).append(it)
-    for src in ["arxiv", "hf-daily", "github", "rss"]:
+    for src in ordered_sources:
         bucket = by_source.get(src, [])
         if not bucket:
             continue
         lines.append(f"### {src} ({len(bucket)})")
-        for it in bucket[:20]:
+        for it in bucket[:by_source_truncate]:
             lines.append(f"- [{it.title}]({it.url}) — {it.published} — score {it.score}")
-        if len(bucket) > 20:
-            lines.append(f"- _…and {len(bucket) - 20} more_")
+        if len(bucket) > by_source_truncate:
+            lines.append(f"- _…and {len(bucket) - by_source_truncate} more_")
         lines.append("")
 
     lines.append("---")
-    lines.append("_This digest is generated automatically by [ai-infer-radar](https://github.com/) — pick one item to discuss in depth._")
+    lines.append("_This digest is generated automatically by [ai-papers-radar](https://github.com/) — pick one item to discuss in depth._")
     return "\n".join(lines)
 
 
@@ -690,10 +669,8 @@ def send_email_o365(subject: str, body_md: str, body_html: str | None = None) ->
     msg["To"] = to_addr
     msg.set_content(body_md)  # plain text fallback = markdown source
 
-    host = "smtp.office365.com"
-    port = 587
     ctx = ssl.create_default_context()
-    with smtplib.SMTP(host, port, timeout=60) as s:
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) as s:
         s.ehlo()
         s.starttls(context=ctx)
         s.ehlo()
@@ -800,9 +777,8 @@ def main() -> int:
         score_item(it)
 
     # Drop very low-score items to reduce noise
-    min_score = 2
-    fresh = [it for it in fresh if it.score >= min_score]
-    print(f"[info] after score>={min_score} filter: {len(fresh)}",
+    fresh = [it for it in fresh if it.score >= MIN_SCORE]
+    print(f"[info] after score>={MIN_SCORE} filter: {len(fresh)}",
           file=sys.stderr)
 
     # Render
@@ -829,9 +805,9 @@ def main() -> int:
 
     # Email
     if mode == "monthly":
-        subject = f"[ai-infer-radar] Monthly Digest {window_label} ({len(fresh)} items)"
+        subject = f"[ai-papers-radar] Monthly Digest {window_label} ({len(fresh)} items)"
     else:
-        subject = f"[ai-infer-radar] Weekly Digest — {today} ({len(fresh)} items)"
+        subject = f"[ai-papers-radar] Weekly Digest — {today} ({len(fresh)} items)"
     try:
         send_email_o365(subject, md)
     except Exception as e:
