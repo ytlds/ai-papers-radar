@@ -34,6 +34,7 @@ import re
 import smtplib
 import ssl
 import sys
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -53,6 +54,11 @@ REPORTS_DIR = REPO_ROOT / "reports"
 
 USER_AGENT = "ai-infer-radar/1.0 (github-actions)"
 REQ_TIMEOUT = 30  # seconds
+
+# Retry policy for all network calls.
+# Strategy: retry on ANY exception (including HTTP 4xx), exponential backoff.
+REQ_MAX_RETRIES = 3          # total attempts = REQ_MAX_RETRIES
+REQ_BACKOFF_BASE = 1.0       # seconds; delays are 1s, 2s, 4s, ...
 
 # arXiv categories most relevant for inference acceleration
 ARXIV_CATEGORIES = ["cs.LG", "cs.DC", "cs.AR", "cs.CL"]
@@ -195,13 +201,53 @@ class Item:
 # HTTP helper (stdlib only)
 # ---------------------------------------------------------------------------
 
+def _request_with_retry(
+    req: urllib.request.Request,
+    timeout: int = REQ_TIMEOUT,
+    max_retries: int = REQ_MAX_RETRIES,
+    backoff_base: float = REQ_BACKOFF_BASE,
+) -> bytes:
+    """Perform an HTTP request with timeout + retry.
+
+    Retry policy (per user spec):
+      - Retry on ANY exception, including HTTPError 4xx/5xx and network errors.
+      - Exponential backoff between attempts: backoff_base * 2**(attempt-1),
+        i.e. 1s, 2s, 4s for the default base=1.0.
+      - Total attempts = max_retries (default 3). The final failure re-raises
+        the last exception so callers' existing try/except still works.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except Exception as e:  # noqa: BLE001 - intentional: retry on any error
+            last_exc = e
+            if attempt < max_retries:
+                delay = backoff_base * (2 ** (attempt - 1))
+                print(
+                    f"[retry] {req.full_url} attempt {attempt}/{max_retries} "
+                    f"failed: {type(e).__name__}: {e}; sleeping {delay:.1f}s",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+            else:
+                print(
+                    f"[retry] {req.full_url} attempt {attempt}/{max_retries} "
+                    f"failed: {type(e).__name__}: {e}; giving up",
+                    file=sys.stderr,
+                )
+    # Exhausted all attempts; re-raise the last exception.
+    assert last_exc is not None
+    raise last_exc
+
+
 def http_get(url: str, accept: str = "*/*") -> bytes:
     req = urllib.request.Request(
         url,
         headers={"User-Agent": USER_AGENT, "Accept": accept},
     )
-    with urllib.request.urlopen(req, timeout=REQ_TIMEOUT) as resp:
-        return resp.read()
+    return _request_with_retry(req)
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +326,11 @@ def fetch_hf_daily(since: datetime, until: datetime) -> list[Item]:
     while True:
         url = f"https://huggingface.co/api/daily_papers?page={page}&limit=50"
         try:
-            raw = http_get(url, accept="application/json")
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            )
+            raw = _request_with_retry(req)
             data = json.loads(raw)
         except Exception:
             break
@@ -353,8 +403,7 @@ def fetch_github_releases(since: datetime, until: datetime) -> list[Item]:
                     **({"Authorization": f"Bearer {token}"} if token else {}),
                 },
             )
-            with urllib.request.urlopen(req, timeout=REQ_TIMEOUT) as resp:
-                releases = json.loads(resp.read())
+            releases = json.loads(_request_with_retry(req))
         except Exception as e:
             print(f"[warn] github releases fetch failed for {repo}: {e}",
                   file=sys.stderr)
@@ -578,9 +627,8 @@ def render_markdown(mode: str, items: list[Item], failures: list[str],
         lines.append("")
 
     # Group by source for the body, after a top-N summary
-    items_sorted = sorted(items, key=lambda x: (-x.score, x.published), reverse=False)
     items_sorted = sorted(items, key=lambda x: (-x.score, x.published))
-    # The above is intentional: primary key = score desc, secondary = published asc
+    # primary key = score desc, secondary = published asc
 
     lines.append(f"## Top {min(top_n, len(items))} by Score")
     lines.append("")
