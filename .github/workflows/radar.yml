@@ -2,12 +2,12 @@ name: radar
 
 on:
   schedule:
-    # Weekly: every Monday at 08:00 UTC (= JST 17:00)
-    - cron: '0 8 * * 1'
-    # Monthly: 1st of every month at 09:00 UTC.
+    # Weekly: every Monday at 08:00 UTC+8
+    - cron: '0 0 * * 1'
+    # Monthly: 1st of every month at 09:00 UTC+8.
     # The script computes the previous calendar month's window
     # (e.g. when triggered on 2026-06-01, it covers 2026-05-01 ~ 2026-05-31).
-    - cron: '0 9 1 * *'
+    - cron: '0 1 1 * *'
   workflow_dispatch:
     inputs:
       mode:
